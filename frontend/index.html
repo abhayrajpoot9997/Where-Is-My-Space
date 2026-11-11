@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Local prototype for estimating available seats in shared spaces.">
+  <title>Where Is My Space</title>
+  <style>
+    :root { color-scheme: light; --ink:#17212b; --muted:#5c6874; --line:#dce3e8; --blue:#1769aa; --pale:#eef6fc; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif; background:#f5f7f9; color:var(--ink); }
+    main { width:min(760px, calc(100% - 32px)); margin:48px auto; }
+    header { margin-bottom:24px; }
+    .eyebrow { color:var(--blue); font-size:.78rem; font-weight:700; letter-spacing:.12em; text-transform:uppercase; }
+    h1 { margin:.35rem 0; font-size:clamp(2rem,6vw,3.1rem); letter-spacing:-.04em; }
+    .tagline { color:var(--muted); margin:0; }
+    .panel { background:white; border:1px solid var(--line); border-radius:18px; padding:24px; box-shadow:0 8px 28px #1425360a; }
+    label { display:block; font-weight:650; margin:16px 0 8px; }
+    input[type=number], input[type=file] { width:100%; padding:12px; border:1px solid var(--line); border-radius:10px; background:white; }
+    .actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:16px; }
+    button { border:0; border-radius:10px; padding:12px 16px; background:var(--blue); color:white; font-weight:700; cursor:pointer; }
+    button.secondary { background:#eaf0f5; color:var(--ink); }
+    button:disabled { opacity:.55; cursor:wait; }
+    video, canvas, #preview { width:100%; max-height:360px; object-fit:contain; margin-top:14px; border-radius:12px; background:#101820; }
+    #preview:empty { display:none; }
+    #camera { display:none; }
+    #message { min-height:24px; color:var(--muted); margin-top:14px; }
+    #result { display:none; margin-top:20px; padding:18px; border-radius:14px; background:var(--pale); }
+    .numbers { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:14px 0; }
+    .metric { background:white; border:1px solid var(--line); border-radius:12px; padding:14px; }
+    .metric strong { display:block; font-size:1.8rem; }
+    .metric span { color:var(--muted); font-size:.82rem; }
+    .warning, footer { color:var(--muted); font-size:.88rem; line-height:1.5; }
+    footer { margin:18px 4px; }
+    @media(max-width:520px) { main { margin:28px auto; } .panel { padding:18px; } .numbers { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Local prototype · v0.1</div>
+    <h1>Where Is My Space</h1>
+    <p class="tagline">Physical space, understood.</p>
+  </header>
+
+  <section class="panel">
+    <h2>Check a room</h2>
+    <p class="warning">Enter the room's total seat capacity, then upload an image or capture one. Processing runs on this computer's local server.</p>
+
+    <label for="capacity">Total seat capacity</label>
+    <input id="capacity" type="number" min="1" max="1000" value="20">
+
+    <label for="image">Room image (JPG or PNG, max 10 MB)</label>
+    <input id="image" type="file" accept="image/jpeg,image/png">
+
+    <div class="actions">
+      <button type="button" class="secondary" id="openCamera">Open camera</button>
+      <button type="button" class="secondary" id="capture" disabled>Capture photo</button>
+      <button type="button" id="analyze">Analyze occupancy</button>
+    </div>
+
+    <video id="camera" autoplay playsinline></video>
+    <img id="preview" alt="Selected room image preview">
+    <canvas id="canvas" hidden></canvas>
+    <div id="message" role="status" aria-live="polite"></div>
+
+    <div id="result" aria-live="polite">
+      <h3>Occupancy estimate</h3>
+      <div class="numbers">
+        <div class="metric"><strong id="people">—</strong><span>People detected</span></div>
+        <div class="metric"><strong id="occupied">—</strong><span>Estimated occupied seats</span></div>
+        <div class="metric"><strong id="available">—</strong><span>Estimated available seats</span></div>
+      </div>
+      <p class="warning" id="warning"></p>
+    </div>
+  </section>
+
+  <footer>
+    Demo only: this detector can miss seated or obscured people and may produce false detections.
+    Do not use it for safety-critical decisions. Avoid images of identifiable people unless you
+    have permission. Images are processed in memory and are not intentionally stored.
+  </footer>
+</main>
+
+<script>
+  const imageInput = document.getElementById("image");
+  const preview = document.getElementById("preview");
+  const video = document.getElementById("camera");
+  const canvas = document.getElementById("canvas");
+  const message = document.getElementById("message");
+  const captureButton = document.getElementById("capture");
+  let cameraStream = null;
+  let capturedFile = null;
+
+  function setMessage(text) { message.textContent = text; }
+
+  imageInput.addEventListener("change", () => {
+    capturedFile = null;
+    const file = imageInput.files[0];
+    if (file) {
+      preview.src = URL.createObjectURL(file);
+      preview.style.display = "block";
+      setMessage("Image selected. Ready to analyze.");
+    }
+  });
+
+  document.getElementById("openCamera").addEventListener("click", async () => {
+    try {
+      cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      video.srcObject = cameraStream;
+      video.style.display = "block";
+      captureButton.disabled = false;
+      setMessage("Camera active. Capture a frame when ready.");
+    } catch (error) {
+      setMessage("Camera unavailable or permission denied. You can upload an image instead.");
+    }
+  });
+
+  captureButton.addEventListener("click", () => {
+    if (!cameraStream) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d").drawImage(video, 0, 0);
+    canvas.toBlob(blob => {
+      if (!blob) { setMessage("Could not capture image."); return; }
+      capturedFile = new File([blob], "room-capture.jpg", { type: "image/jpeg" });
+      preview.src = URL.createObjectURL(capturedFile);
+      preview.style.display = "block";
+      setMessage("Photo captured locally. Select Analyze occupancy.");
+    }, "image/jpeg", 0.9);
+  });
+
+  document.getElementById("analyze").addEventListener("click", async () => {
+    const capacity = Number(document.getElementById("capacity").value);
+    const file = capturedFile || imageInput.files[0];
+    if (!Number.isInteger(capacity) || capacity < 1 || capacity > 1000) {
+      setMessage("Enter a whole-number capacity between 1 and 1000."); return;
+    }
+    if (!file) { setMessage("Choose an image or capture a photo first."); return; }
+
+    const button = document.getElementById("analyze");
+    button.disabled = true;
+    setMessage("Analyzing image on the local server...");
+    try {
+      const form = new FormData();
+      form.append("image", file);
+      form.append("capacity", String(capacity));
+      const response = await fetch("/api/analyze", { method: "POST", body: form });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Analysis failed.");
+
+      document.getElementById("people").textContent = data.detected_people;
+      document.getElementById("occupied").textContent = data.estimated_occupied_seats;
+      document.getElementById("available").textContent = data.estimated_available_seats;
+      document.getElementById("warning").textContent = data.warning;
+      document.getElementById("result").style.display = "block";
+      setMessage("Estimate complete. Verify the result manually.");
+    } catch (error) {
+      setMessage(error.message || "Could not reach the local API. Is the server running?");
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  window.addEventListener("beforeunload", () => {
+    if (cameraStream) cameraStream.getTracks().forEach(track => track.stop());
+  });
+</script>
+</body>
+</html>
