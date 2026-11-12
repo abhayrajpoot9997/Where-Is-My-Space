@@ -32,3 +32,6 @@ data/private/
 *.png
 *.mp4
 *.mov
+
+# AI model weights
+*.pt
